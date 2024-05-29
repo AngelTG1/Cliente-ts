@@ -31,6 +31,7 @@ class Usuario extends Model {
   public id!: number;
   public name!: string;
   public password!: string;
+
 }
 
 Usuario.init({
@@ -57,6 +58,7 @@ class Encuesta extends Model {
   public id!: number;
   public pregunta!: string;
   public respuestas!: string[];
+  public status!: number;
 }
 
 Encuesta.init({
@@ -71,6 +73,10 @@ Encuesta.init({
   },
   respuestas: {
     type: DataTypes.JSON,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.INTEGER,
     allowNull: false
   }
 }, {
@@ -146,28 +152,110 @@ app.get("/encuesta-nueva", authenticateJWT, (req: Request, res: Response) => {
 
 app.post("/crear-encuesta", authenticateJWT, async (req: Request, res: Response) => {
   const { pregunta, respuestas } = req.body;
-  const nuevaEncuesta = await Encuesta.create({ pregunta, respuestas });
 
-  responderClientes(nuevaEncuesta);
+  if (!pregunta || !respuestas) {
+    return res.status(400).json({ success: false, message: "Pregunta y respuestas son requeridas" });
+  }
 
-  res.json({ success: true, encuesta: nuevaEncuesta });
+  try {
+    const nuevaEncuesta = await Encuesta.create({ pregunta, respuestas, status: 1 });
+
+    responderClientes(nuevaEncuesta);
+
+    res.json({ success: true, encuesta: nuevaEncuesta });
+  } catch (error) {
+    console.error("Error creating survey:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
-app.post("/enviar-respuesta/:id", authenticateJWT, (req: Request, res: Response) => {
+
+app.patch("/encuesta-status", authenticateJWT, async (req: Request, res: Response) => {
+  const { id, status } = req.body;
+
+  if (id === undefined || status === undefined) {
+    return res.status(400).json({ success: false, message: "ID and status are required" });
+  }
+
+  try {
+    const encuesta = await Encuesta.findByPk(id);
+
+    if (!encuesta) {
+      return res.status(404).json({ success: false, message: "Encuesta not found" });
+    }
+
+    encuesta.status = status;
+    await encuesta.save();
+
+    res.json({ success: true, message: "Encuesta status updated successfully" });
+  } catch (error) {
+    console.error("Error updating encuesta status:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/enviar-respuesta/:id", authenticateJWT, async (req: Request, res: Response) => {
   const encuestaId = req.params.id;
   const respuesta = req.body.respuesta;
 
-  console.log(`Encuesta ID: ${encuestaId}, Respuesta: ${respuesta}`);
+  try {
+    const encuesta = await Encuesta.findByPk(encuestaId);
 
-  res.json({
-    success: true,
-    message: "Respuesta recibida",
-  });
+    if (!encuesta) {
+      return res.status(404).json({ success: false, message: "Encuesta no encontrada" });
+    }
+
+    if (encuesta.status === 0) {
+      return res.status(400).json({ success: false, message: "No se puede responder a una encuesta cerrada" });
+    }
+
+    console.log(`Encuesta ID: ${encuestaId}, Respuesta: ${respuesta}`);
+
+    res.json({
+      success: true,
+      message: "Respuesta recibida",
+    });
+  } catch (error) {
+    console.error("Error enviando respuesta:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
 app.get("/ver-encuestas", authenticateJWT, async (req: Request, res: Response) => {
   const encuestas = await Encuesta.findAll();
   res.json({ success: true, encuestas });
+});
+
+app.get('/encuestas-cerradas', authenticateJWT, async (req: Request, res: Response) => {
+  try {
+    const encuestasCerradas = await Encuesta.findAll({
+      where: {
+        status: 0
+      }
+    });
+
+    const encuestasCerradasIds = encuestasCerradas.map(encuesta => encuesta.id as number);
+    console.log("Encuestas cerradas:", encuestasCerradasIds);
+
+    res.json({ success: true, encuestas: encuestasCerradas });
+  } catch (error) {
+    console.error("Error retrieving closed surveys:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.get('/encuestas-cerradas', authenticateJWT, async (req: Request, res: Response) => {
+  try {
+    const encuestasCerradas = await Encuesta.findAll({
+      where: {
+        status: 0
+      }
+    });
+    res.json({ success: true, encuestas: encuestasCerradas });
+  } catch (error) {
+    console.error("Error retrieving closed surveys:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
 function responderClientes(encuesta: Encuesta) {
