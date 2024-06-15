@@ -1,8 +1,7 @@
 import express, { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import { createServer } from "http";
-import { WebSocket } from "ws";
-import { Server } from "http";
+import { WebSocket, WebSocketServer as WSServer } from "ws";
 import { Sequelize, DataTypes, Model } from "sequelize";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
@@ -31,7 +30,6 @@ class Usuario extends Model {
   public id!: number;
   public name!: string;
   public password!: string;
-
 }
 
 Usuario.init({
@@ -82,6 +80,31 @@ Encuesta.init({
 }, {
   sequelize,
   modelName: 'encuesta'
+});
+
+class Voto extends Model {
+  public id!: number;
+  public encuestaId!: number;
+  public respuesta!: string;
+}
+
+Voto.init({
+  id: {
+    type: DataTypes.INTEGER,
+    autoIncrement: true,
+    primaryKey: true
+  },
+  encuestaId: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  },
+  respuesta: {
+    type: DataTypes.STRING,
+    allowNull: false
+  }
+}, {
+  sequelize,
+  modelName: 'voto'
 });
 
 sequelize.sync().then(() => {
@@ -169,7 +192,6 @@ app.post("/crear-encuesta", authenticateJWT, async (req: Request, res: Response)
   }
 });
 
-
 app.patch("/encuesta-status", authenticateJWT, async (req: Request, res: Response) => {
   const { id, status } = req.body;
 
@@ -209,7 +231,15 @@ app.post("/enviar-respuesta/:id", authenticateJWT, async (req: Request, res: Res
       return res.status(400).json({ success: false, message: "No se puede responder a una encuesta cerrada" });
     }
 
-    console.log(`Encuesta ID: ${encuestaId}, Respuesta: ${respuesta}`);
+    await Voto.create({ encuestaId: Number(encuestaId), respuesta });
+
+    const votos = await Voto.findAll({ where: { encuestaId: Number(encuestaId) } });
+    const conteoVotos = votos.reduce((acc: { [key: string]: number }, voto) => {
+      acc[voto.respuesta] = (acc[voto.respuesta] || 0) + 1;
+      return acc;
+    }, {});
+
+    responderVotos(Number(encuestaId), conteoVotos);
 
     res.json({
       success: true,
@@ -234,23 +264,9 @@ app.get('/encuestas-cerradas', authenticateJWT, async (req: Request, res: Respon
       }
     });
 
-    const encuestasCerradasIds = encuestasCerradas.map(encuesta => encuesta.id as number);
+    const encuestasCerradasIds = encuestasCerradas.map(encuesta => encuesta.id);
     console.log("Encuestas cerradas:", encuestasCerradasIds);
 
-    res.json({ success: true, encuestas: encuestasCerradas });
-  } catch (error) {
-    console.error("Error retrieving closed surveys:", error);
-    res.status(500).json({ success: false, message: "Internal server error" });
-  }
-});
-
-app.get('/encuestas-cerradas', authenticateJWT, async (req: Request, res: Response) => {
-  try {
-    const encuestasCerradas = await Encuesta.findAll({
-      where: {
-        status: 0
-      }
-    });
     res.json({ success: true, encuestas: encuestasCerradas });
   } catch (error) {
     console.error("Error retrieving closed surveys:", error);
@@ -265,53 +281,80 @@ function responderClientes(encuesta: Encuesta) {
   responses = [];
 }
 
-export function WebSocketServer(server: Server) {
-  const wss = new WebSocket.Server({ server });
-
-  wss.on("connection", (ws: WebSocket) => {
-    console.log("Cliente conectado");
-
-    ws.send(JSON.stringify({ message: "Conectado al servidor de encuestas" }));
-
-    ws.on("message", async (data: string) => {
-      console.log("Mensaje recibido: ", data.toString());
-      const dataJson = JSON.parse(data);
-
-      switch (dataJson.action) {
-        case "getEncuestas":
-          const encuestas = await Encuesta.findAll();
-          ws.send(JSON.stringify({ event: "getEncuestas", data: encuestas }));
-          break;
-
-        case "crearEncuesta":
-          const nuevaEncuesta = await Encuesta.create({
-            pregunta: dataJson.data.pregunta,
-            respuestas: dataJson.data.respuestas,
-          });
-
-          wss.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(JSON.stringify({ event: "nuevaEncuesta", data: nuevaEncuesta }));
-            }
-          });
-          break;
-      }
-    });
-
-    ws.on("close", () => {
-      console.log("Cliente desconectado");
-    });
-
-    ws.on("error", (error) => {
-      console.error("Error en WebSocket:", error);
-    });
+function responderVotos(encuestaId: number, conteoVotos: { [key: string]: number }) {
+  const data = JSON.stringify({ event: "actualizacionVotos", data: { encuestaId, conteoVotos } });
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(data);
+    }
   });
-
-  console.log("WebSocket server is running");
 }
 
 const server = createServer(app);
-WebSocketServer(server);
+
+const wss = new WSServer({ server });
+
+wss.on("connection", (ws: WebSocket) => {
+  console.log("Cliente conectado");
+
+  ws.send(JSON.stringify({ message: "Conectado al servidor de encuestas" }));
+
+  ws.on("message", async (data: string) => {
+    console.log("Mensaje recibido: ", data.toString());
+    const dataJson = JSON.parse(data);
+
+    switch (dataJson.action) {
+      case "getEncuestas":
+        const encuestas = await Encuesta.findAll();
+        ws.send(JSON.stringify({ event: "getEncuestas", data: encuestas }));
+        break;
+
+      case "crearEncuesta":
+        const nuevaEncuesta = await Encuesta.create({
+          pregunta: dataJson.data.pregunta,
+          respuestas: dataJson.data.respuestas,
+        });
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ event: "nuevaEncuesta", data: nuevaEncuesta }));
+          }
+        });
+        break;
+
+      case "votar":
+        const { encuestaId, respuesta } = dataJson.data;
+
+        // Guarda el voto en la base de datos
+        await Voto.create({ encuestaId, respuesta });
+
+        // Obtén los votos actualizados
+        const votos = await Voto.findAll({ where: { encuestaId } });
+        const conteoVotos = votos.reduce((acc: { [key: string]: number }, voto) => {
+          acc[voto.respuesta] = (acc[voto.respuesta] || 0) + 1;
+          return acc;
+        }, {});
+
+        // Envía la actualización a todos los clientes conectados
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ event: "actualizacionVotos", data: { encuestaId, conteoVotos } }));
+          }
+        });
+        break;
+    }
+  });
+
+  ws.on("close", () => {
+    console.log("Cliente desconectado");
+  });
+
+  ws.on("error", (error) => {
+    console.error("Error en WebSocket:", error);
+  });
+});
+
+console.log("WebSocket server is running");
 
 server.listen(port, () => {
   console.log(`Server running on ${port}`);
